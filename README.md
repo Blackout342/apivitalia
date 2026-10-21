@@ -2,8 +2,6 @@
 
 Cuenta, sesión, perfil, historial y contactos. Las rutas están en `views.py` y la forma del JSON en `models.py`.
 
-Copia `.env.example` a `.env` y pon ahí la contraseña de la base y el secreto del token. Ese archivo no se sube al repositorio.
-
 ```bash
 uvicorn views:app --reload
 ```

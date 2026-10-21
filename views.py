@@ -47,7 +47,7 @@ def requerida(nombre: str) -> str:
     """Falla al arrancar si falta un dato, en vez de conectar con la contraseña vacía."""
     valor = os.environ.get(nombre, "").strip()
     if not valor:
-        raise RuntimeError(f"Falta {nombre}. Copia .env.example a .env y complétalo.")
+        raise RuntimeError(f"Falta {nombre}.")
     return valor
 
 
