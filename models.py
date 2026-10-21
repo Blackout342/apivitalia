@@ -1,0 +1,113 @@
+"""Forma del JSON que entra y sale. La validación en español vive en views.py."""
+
+from datetime import datetime
+
+from pydantic import BaseModel, Field
+
+
+class ContactoRespuesta(BaseModel):
+    """Contacto de la cuenta. Las banderas del celular no viajan aquí."""
+
+    id: str
+    nombre: str
+    telefono: str
+    parentesco: str
+
+
+class HistorialRespuesta(BaseModel):
+    """Ficha médica. tipo_sangre null significa «No sé»."""
+
+    id: str | None = None
+    tipo_sangre: str | None = None
+    alergias: str = ""
+    notas: str = ""
+    enfermedades: list[str]
+    antecedentes: list[str]
+
+
+class UsuarioRespuesta(BaseModel):
+    """Cuenta lista para rehidratar la app. Nunca incluye la contraseña ni su hash."""
+
+    id: str
+    telefono: str
+    correo: str = ""
+    nombre: str
+    apellido_paterno: str
+    apellido_materno: str | None = None
+    fecha_nacimiento: str | None = None
+    activo: int
+    historial: HistorialRespuesta
+    contactos: list[ContactoRespuesta]
+
+
+class SesionRespuesta(BaseModel):
+    """Token de 7 días y la misma ficha que GET /usuarios/{id}."""
+
+    token: str
+    usuario: UsuarioRespuesta
+
+
+class EnfermedadRespuesta(BaseModel):
+    """Fila activa del catálogo. El id es el de la app, por ejemplo diabetes."""
+
+    id: str
+    titulo: str
+
+
+class UsuarioNuevo(BaseModel):
+    """Registro. contacto null si la persona todavía no anota a nadie."""
+
+    telefono: str
+    correo: str | None = ""
+    contrasena: str
+    nombre: str
+    apellido_paterno: str
+    apellido_materno: str | None = None
+    fecha_nacimiento: str
+    tipo_sangre: str | None = None
+    alergias: str | None = ""
+    notas: str | None = ""
+    enfermedades: list[str] = Field(default_factory=list)
+    antecedentes: list[str] = Field(default_factory=list)
+    contacto: dict | None = None
+
+
+class SesionNueva(BaseModel):
+    telefono: str
+    contrasena: str
+
+
+class RecuperacionNueva(BaseModel):
+    telefono: str
+
+
+class RestablecerContrasena(BaseModel):
+    telefono: str
+    codigo: str
+    contrasena_nueva: str
+
+
+class ContactoNuevo(BaseModel):
+    nombre: str
+    telefono: str
+    parentesco: str | None = ""
+
+
+class RecetaInfo(BaseModel):
+    """Cita de la que salió la medicina. No viene si el usuario la anotó solo."""
+
+    cita_id: str
+    doctor: str
+    fecha: datetime
+
+
+class MedicinaRespuesta(BaseModel):
+    """Medicina guardada, con las enfermedades para las que se toma y su receta si existe."""
+
+    id: str
+    nombre: str
+    dosis: str | None
+    indicaciones: str | None
+    enfermedades: list[str]
+    receta: RecetaInfo | None
+    creado_en: datetime
