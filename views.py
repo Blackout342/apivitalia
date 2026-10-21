@@ -15,6 +15,7 @@ import bcrypt
 import jwt
 from fastapi import Body, Depends, FastAPI, Header, Response
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -63,6 +64,17 @@ DB_USER = requerida("DB_USER")
 DB_PASSWORD = requerida("DB_PASSWORD")
 JWT_SECRETO = requerida("JWT_SECRETO")
 JWT_ALGORITMO = "HS256"
+# Clave del panel de Cruz Roja. Si falta, GET /emergencias no deja pasar a nadie.
+CRUZ_ROJA_CLAVE = os.environ.get("CRUZ_ROJA_CLAVE", "").strip()
+# Orígenes del panel separados por coma. Solo ellos pueden leer GET /emergencias desde el navegador.
+CORS_ORIGENES = [
+    origen.strip()
+    for origen in os.environ.get("CORS_ORIGENES", "http://localhost:5500,http://127.0.0.1:5500").split(",")
+    if origen.strip()
+]
+app.add_middleware(
+    CORSMiddleware, allow_origins=CORS_ORIGENES, allow_methods=["GET"], allow_headers=["Authorization"]
+)
 TIPOS_SANGRE = {"A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"}
 
 # Ids que la app ya conoce. Se aseguran al arrancar, sin borrar el resto del catálogo.
@@ -1327,6 +1339,41 @@ def guardar_emergencia(usuario_id: str | None, datos: dict) -> dict:
         "datos_enviados": enviados,
         "creado_en": creado_en,
     }
+
+
+def clave_cruz_roja(authorization: str | None = Header(default=None)) -> None:
+    """Lee Authorization: Bearer <clave> del panel. No es un token de usuario."""
+    partes = (authorization or "").split(" ", 1)
+    if len(partes) != 2 or partes[0].lower() != "bearer" or not partes[1].strip():
+        raise ErrorAPI(401, "Falta la clave")
+    if not CRUZ_ROJA_CLAVE or not secrets.compare_digest(
+        partes[1].strip().encode(), CRUZ_ROJA_CLAVE.encode()
+    ):
+        raise ErrorAPI(401, "La clave no es válida")
+
+
+@app.get("/emergencias", response_model=list[EmergenciaRespuesta], dependencies=[Depends(clave_cruz_roja)])
+def listar_emergencias():
+    """Todas las emergencias, la más nueva primero. Solo para el panel de Cruz Roja."""
+    try:
+        with engine.connect() as conn:
+            filas = conn.execute(text("""
+                SELECT id, usuario_id, latitud, longitud, telefono_llamado, datos_enviados, creado_en
+                FROM emergencia
+                ORDER BY creado_en DESC, id
+            """)).mappings().all()
+    except SQLAlchemyError:
+        logging.exception("No se pudieron leer las emergencias")
+        raise ErrorAPI(503, "No se pudo consultar la base de datos")
+
+    emergencias = []
+    for fila in filas:
+        # MySQL regresa la columna JSON como texto.
+        enviados = fila["datos_enviados"]
+        if isinstance(enviados, str):
+            enviados = json.loads(enviados)
+        emergencias.append(dict(fila, datos_enviados=enviados))
+    return emergencias
 
 
 asegurar_esquema()

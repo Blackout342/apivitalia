@@ -24,6 +24,7 @@ Necesita Python 3.10 o más nuevo. Con [uv](https://docs.astral.sh/uv/) se baja 
    DB_USER=
    DB_PASSWORD=
    JWT_SECRETO=
+   CRUZ_ROJA_CLAVE=
    ```
 
    La base es MySQL y la conexión usa SSL. Para `JWT_SECRETO` sirve cualquier texto largo, por ejemplo el que da `python3 -c "import secrets; print(secrets.token_urlsafe(48))"`. Si falta algún dato, la API no arranca y dice cuál (`Falta DB_HOST.`). Las tablas y el catálogo de enfermedades se crean solos al arrancar.
@@ -145,6 +146,14 @@ Con token. Lo manda el botón de emergencia del reloj o del celular. Body: `{ "l
 Sin token. Lo manda el reloj cuando no está ligado al celular, así el aviso sale aunque no haya cuenta. Mismo body y misma respuesta que `POST /usuarios/{id}/emergencias`, pero `usuario_id` es null y `datos_enviados` va vacío: `{ "nombre": "", "alergias": "", "tipo_sangre": null, "contacto": null }`.
 
 - 422: `La latitud no es válida`, `La longitud no es válida` o `El número llamado no es válido`
+
+### `GET /emergencias`
+
+Para el panel de Cruz Roja. Pide `Authorization: Bearer <clave>` con la clave `CRUZ_ROJA_CLAVE` del `.env`, no un token de usuario. Si la variable falta, nadie entra. Devuelve todas las emergencias, la más nueva primero, cada una con la misma forma que `POST /emergencias`. `creado_en` va en UTC.
+
+El navegador solo deja leerla desde los orígenes de `CORS_ORIGENES`, separados por coma. Si falta, valen `http://localhost:5500` y `http://127.0.0.1:5500`.
+
+- 401: `Falta la clave` o `La clave no es válida`
 
 
 
