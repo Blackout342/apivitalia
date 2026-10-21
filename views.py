@@ -517,7 +517,7 @@ def asegurar_esquema() -> None:
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS emergencia (
                 id CHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-                usuario_id CHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+                usuario_id CHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL,
                 latitud DECIMAL(9,6) NOT NULL,
                 longitud DECIMAL(9,6) NOT NULL,
                 telefono_llamado VARCHAR(15) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
@@ -528,6 +528,11 @@ def asegurar_esquema() -> None:
                 CONSTRAINT fk_emergencia_usuario
                     FOREIGN KEY (usuario_id) REFERENCES usuario (id) ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """))
+        # NULL cuando el reloj pidió ayuda sin cuenta. Las tablas que ya existían se abren aquí.
+        conn.execute(text("""
+            ALTER TABLE emergencia
+            MODIFY usuario_id CHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL
         """))
         # NULL significa «No sé». La columna ya podía serlo; se deja explícito.
         conn.execute(text("""
@@ -1268,6 +1273,17 @@ def datos_para_emergencia(conn, usuario_id: str) -> dict:
 def registrar_emergencia(usuario_id: str, datos: dict = Body(...), token_id: str = Depends(usuario_actual)):
     """El reloj o el celular solo manda ubicación y número. Lo médico sale de la cuenta del token."""
     exigir_propio(token_id, usuario_id)
+    return guardar_emergencia(usuario_id, datos)
+
+
+@app.post("/emergencias", response_model=EmergenciaRespuesta, status_code=201)
+def registrar_emergencia_sin_cuenta(datos: dict = Body(...)):
+    """Sin token. El reloj la usa cuando no está ligado al celular, así el aviso sale aunque no haya cuenta."""
+    return guardar_emergencia(None, datos)
+
+
+def guardar_emergencia(usuario_id: str | None, datos: dict) -> dict:
+    """Sin cuenta no hay ficha que copiar, así que datos_enviados va vacío."""
     latitud = leer_coordenada(datos.get("latitud"), 90, "La latitud no es válida")
     longitud = leer_coordenada(datos.get("longitud"), 180, "La longitud no es válida")
     telefono_llamado = leer_telefono_llamado(datos.get("telefono_llamado"))
@@ -1275,7 +1291,10 @@ def registrar_emergencia(usuario_id: str, datos: dict = Body(...), token_id: str
     creado_en = ahora().replace(microsecond=0)
     try:
         with engine.begin() as conn:
-            enviados = datos_para_emergencia(conn, usuario_id)
+            if usuario_id:
+                enviados = datos_para_emergencia(conn, usuario_id)
+            else:
+                enviados = {"nombre": "", "alergias": "", "tipo_sangre": None, "contacto": None}
             conn.execute(
                 text("""
                     INSERT INTO emergencia

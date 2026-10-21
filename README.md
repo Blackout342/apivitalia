@@ -2,11 +2,42 @@
 
 Cuenta, sesión, perfil, historial, contactos, medicinas y emergencias. Las rutas están en `views.py` y la forma del JSON en `models.py`.
 
-```bash
-uvicorn views:app --reload
-```
+## Cómo correrla
 
-Documentación interactiva: `http://127.0.0.1:8000/docs`.
+Necesita Python 3.10 o más nuevo. Con [uv](https://docs.astral.sh/uv/) se baja solo.
+
+1. Crea el entorno e instala las dependencias:
+
+   ```bash
+   uv venv --python 3.12 .venv
+   uv pip install -r requirements.txt
+   ```
+
+   Sin uv: `python3.12 -m venv .venv` y `.venv/bin/pip install -r requirements.txt`.
+
+2. Crea un archivo `.env` en esta carpeta. No se sube al repositorio.
+
+   ```
+   DB_HOST=
+   DB_PORT=3306
+   DB_NAME=
+   DB_USER=
+   DB_PASSWORD=
+   JWT_SECRETO=
+   ```
+
+   La base es MySQL y la conexión usa SSL. Para `JWT_SECRETO` sirve cualquier texto largo, por ejemplo el que da `python3 -c "import secrets; print(secrets.token_urlsafe(48))"`. Si falta algún dato, la API no arranca y dice cuál (`Falta DB_HOST.`). Las tablas y el catálogo de enfermedades se crean solos al arrancar.
+
+3. Arranca la API:
+
+   ```bash
+   source .venv/bin/activate
+   uvicorn views:app --reload
+   ```
+
+   Documentación interactiva: `http://127.0.0.1:8000/docs`.
+
+   Para probar desde un iPhone o reloj de verdad, arranca con `--host 0.0.0.0` y usa la IP de la Mac en la red, por ejemplo `http://192.168.1.20:8000`. El simulador sí puede usar `127.0.0.1`.
 
 Las rutas con token piden `Authorization: Bearer <token>`. El token dura 7 días y solo puede leer y escribir su propia cuenta. Los errores llegan como `{ "error": "mensaje" }`.
 
@@ -108,3 +139,14 @@ Con token. Lo manda el botón de emergencia del reloj o del celular. Body: `{ "l
 - 403: el token es de otra cuenta
 - 404: no existe esa cuenta
 - 422: `La latitud no es válida`, `La longitud no es válida` o `El número llamado no es válido`
+
+### `POST /emergencias`
+
+Sin token. Lo manda el reloj cuando no está ligado al celular, así el aviso sale aunque no haya cuenta. Mismo body y misma respuesta que `POST /usuarios/{id}/emergencias`, pero `usuario_id` es null y `datos_enviados` va vacío: `{ "nombre": "", "alergias": "", "tipo_sangre": null, "contacto": null }`.
+
+- 422: `La latitud no es válida`, `La longitud no es válida` o `El número llamado no es válido`
+
+
+
+easter egg 
+dont grab me

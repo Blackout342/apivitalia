@@ -123,10 +123,11 @@ class DatosEmergencia(BaseModel):
 
 
 class EmergenciaRespuesta(BaseModel):
-    """Emergencia guardada. El celular solo mandó latitud, longitud y telefono_llamado."""
+    """Emergencia guardada. El celular solo mandó latitud, longitud y telefono_llamado.
+    usuario_id es null y datos_enviados va vacío cuando se mandó sin cuenta."""
 
     id: str
-    usuario_id: str
+    usuario_id: str | None
     latitud: float
     longitud: float
     telefono_llamado: str
