@@ -1,6 +1,6 @@
 # API Vitalia
 
-Cuenta, sesión, perfil, historial y contactos. Las rutas están en `views.py` y la forma del JSON en `models.py`.
+Cuenta, sesión, perfil, historial, contactos, medicinas y emergencias. Las rutas están en `views.py` y la forma del JSON en `models.py`.
 
 ```bash
 uvicorn views:app --reload
@@ -100,3 +100,11 @@ Con token. Registra una medicina que el usuario anota por su cuenta. Body: `{ "i
 
 - 409: esa medicina ya está registrada
 - 404: no existe esa cuenta
+
+### `POST /usuarios/{id}/emergencias`
+
+Con token. Lo manda el botón de emergencia del reloj o del celular. Body: `{ "latitud", "longitud", "telefono_llamado" }`, por ejemplo `{ "latitud": 25.671380, "longitud": -100.309765, "telefono_llamado": "911" }`. El servidor llena `datos_enviados` con la ficha de la cuenta del token: nombre completo, alergias, tipo de sangre y el teléfono del primer contacto (null si no tiene). Esa copia no cambia aunque después se edite el perfil. 201 con `{ "id", "usuario_id", "latitud", "longitud", "telefono_llamado", "datos_enviados", "creado_en" }`.
+
+- 403: el token es de otra cuenta
+- 404: no existe esa cuenta
+- 422: `La latitud no es válida`, `La longitud no es válida` o `El número llamado no es válido`

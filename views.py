@@ -1,8 +1,9 @@
-"""API de cuenta, sesión, perfil, historial, contactos y medicinas.
+"""API de cuenta, sesión, perfil, historial, contactos, medicinas y emergencias.
 
-No incluye citas ni solicitudes de emergencia. La forma del JSON está en models.py.
+No incluye citas. La forma del JSON está en models.py.
 """
 
+import json
 import logging
 import os
 import secrets
@@ -20,6 +21,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from models import (
     ContactoRespuesta,
+    EmergenciaRespuesta,
     EnfermedadRespuesta,
     MedicinaRespuesta,
     SesionRespuesta,
@@ -497,7 +499,7 @@ def ficha(usuario_id: str) -> dict:
 
 
 def asegurar_esquema() -> None:
-    """Crea la tabla del código y asegura el catálogo de enfermedades de la app."""
+    """Crea las tablas del código y de emergencias, y asegura el catálogo de enfermedades de la app."""
     with engine.begin() as conn:
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS codigo_recuperacion (
@@ -509,6 +511,21 @@ def asegurar_esquema() -> None:
                 PRIMARY KEY (id),
                 KEY idx_codigo_usuario (usuario_id, usado),
                 CONSTRAINT fk_codigo_usuario
+                    FOREIGN KEY (usuario_id) REFERENCES usuario (id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS emergencia (
+                id CHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+                usuario_id CHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+                latitud DECIMAL(9,6) NOT NULL,
+                longitud DECIMAL(9,6) NOT NULL,
+                telefono_llamado VARCHAR(15) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+                datos_enviados JSON NOT NULL,
+                creado_en DATETIME NOT NULL,
+                PRIMARY KEY (id),
+                KEY idx_emergencia_usuario (usuario_id, creado_en),
+                CONSTRAINT fk_emergencia_usuario
                     FOREIGN KEY (usuario_id) REFERENCES usuario (id) ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """))
@@ -1211,6 +1228,85 @@ def registrar_medicina(usuario_id: str, datos: dict = Body(...), token_id: str =
         "enfermedades": [],
         "receta": None,
         "creado_en": fila["creado_en"],
+    }
+
+
+def leer_coordenada(valor, limite: int, mensaje: str) -> float:
+    """Número entre -limite y limite. Un booleano no cuenta como número."""
+    if isinstance(valor, bool) or not isinstance(valor, (int, float)):
+        raise ErrorAPI(422, mensaje)
+    if not -limite <= valor <= limite:
+        raise ErrorAPI(422, mensaje)
+    return round(float(valor), 6)
+
+
+def leer_telefono_llamado(valor) -> str:
+    """Solo dígitos, de 1 a 15. Acepta números cortos como 911."""
+    if not isinstance(valor, str) or not valor.strip().isdigit() or len(valor.strip()) > 15:
+        raise ErrorAPI(422, "El número llamado no es válido")
+    return valor.strip()
+
+
+def datos_para_emergencia(conn, usuario_id: str) -> dict:
+    """Copia de la ficha al momento del botón. No cambia si luego se edita el perfil."""
+    perfil = armar_ficha(conn, usuario_id)
+    nombre = " ".join(
+        parte
+        for parte in (perfil["nombre"], perfil["apellido_paterno"], perfil["apellido_materno"])
+        if parte
+    )
+    contactos = perfil["contactos"]
+    return {
+        "nombre": nombre,
+        "alergias": perfil["historial"]["alergias"],
+        "tipo_sangre": perfil["historial"]["tipo_sangre"],
+        "contacto": contactos[0]["telefono"] if contactos else None,
+    }
+
+
+@app.post("/usuarios/{usuario_id}/emergencias", response_model=EmergenciaRespuesta, status_code=201)
+def registrar_emergencia(usuario_id: str, datos: dict = Body(...), token_id: str = Depends(usuario_actual)):
+    """El reloj o el celular solo manda ubicación y número. Lo médico sale de la cuenta del token."""
+    exigir_propio(token_id, usuario_id)
+    latitud = leer_coordenada(datos.get("latitud"), 90, "La latitud no es válida")
+    longitud = leer_coordenada(datos.get("longitud"), 180, "La longitud no es válida")
+    telefono_llamado = leer_telefono_llamado(datos.get("telefono_llamado"))
+    emergencia_id = str(uuid.uuid4())
+    creado_en = ahora().replace(microsecond=0)
+    try:
+        with engine.begin() as conn:
+            enviados = datos_para_emergencia(conn, usuario_id)
+            conn.execute(
+                text("""
+                    INSERT INTO emergencia
+                        (id, usuario_id, latitud, longitud, telefono_llamado, datos_enviados, creado_en)
+                    VALUES
+                        (:id, :usuario_id, :latitud, :longitud, :telefono_llamado, :datos_enviados, :creado_en)
+                """),
+                {
+                    "id": emergencia_id,
+                    "usuario_id": usuario_id,
+                    "latitud": latitud,
+                    "longitud": longitud,
+                    "telefono_llamado": telefono_llamado,
+                    "datos_enviados": json.dumps(enviados, ensure_ascii=False),
+                    "creado_en": creado_en,
+                },
+            )
+    except ErrorAPI:
+        raise
+    except SQLAlchemyError:
+        logging.exception("No se pudo guardar la emergencia")
+        raise ErrorAPI(503, "No se pudo guardar la emergencia")
+
+    return {
+        "id": emergencia_id,
+        "usuario_id": usuario_id,
+        "latitud": latitud,
+        "longitud": longitud,
+        "telefono_llamado": telefono_llamado,
+        "datos_enviados": enviados,
+        "creado_en": creado_en,
     }
 
 

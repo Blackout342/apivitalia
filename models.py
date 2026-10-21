@@ -111,3 +111,24 @@ class MedicinaRespuesta(BaseModel):
     enfermedades: list[str]
     receta: RecetaInfo | None
     creado_en: datetime
+
+
+class DatosEmergencia(BaseModel):
+    """Copia de la ficha guardada con la emergencia. contacto es el primer contacto, o null."""
+
+    nombre: str
+    alergias: str
+    tipo_sangre: str | None
+    contacto: str | None
+
+
+class EmergenciaRespuesta(BaseModel):
+    """Emergencia guardada. El celular solo mandó latitud, longitud y telefono_llamado."""
+
+    id: str
+    usuario_id: str
+    latitud: float
+    longitud: float
+    telefono_llamado: str
+    datos_enviados: DatosEmergencia
+    creado_en: datetime
