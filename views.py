@@ -1309,6 +1309,8 @@ def datos_para_emergencia(conn, usuario_id: str) -> dict:
     contactos = perfil["contactos"]
     return {
         "nombre": nombre,
+        # El de la cuenta, para que Cruz Roja pueda llamarle a la persona
+        "telefono": perfil["telefono"],
         "alergias": perfil["historial"]["alergias"],
         "tipo_sangre": perfil["historial"]["tipo_sangre"],
         "contacto": contactos[0]["telefono"] if contactos else None,
@@ -1332,6 +1334,21 @@ def registrar_emergencia_sin_cuenta(datos: dict = Body(...)):
 ORIGENES = {"telefono", "reloj"}
 
 
+def nombre_sin_cuenta(valor) -> str:
+    """Nombre que manda la app en una emergencia sin cuenta. Si no es texto queda vacío, nunca se rechaza la emergencia."""
+    if not isinstance(valor, str):
+        return ""
+    return " ".join(valor.split())[:150]
+
+
+def telefono_sin_cuenta(valor) -> str | None:
+    """Teléfono de la persona en una emergencia sin cuenta. Solo dígitos, de 7 a 15. Si no sirve queda null."""
+    if not isinstance(valor, str):
+        return None
+    digitos = "".join(c for c in valor if c.isdigit())
+    return digitos if 7 <= len(digitos) <= 15 else None
+
+
 def guardar_emergencia(usuario_id: str | None, datos: dict) -> dict:
     """Sin cuenta no hay ficha que copiar, así que datos_enviados va vacío."""
     latitud = leer_coordenada(datos.get("latitud"), 90, "La latitud no es válida")
@@ -1346,7 +1363,14 @@ def guardar_emergencia(usuario_id: str | None, datos: dict) -> dict:
             if usuario_id:
                 enviados = datos_para_emergencia(conn, usuario_id)
             else:
-                enviados = {"nombre": "", "alergias": "", "tipo_sangre": None, "contacto": None}
+                # Sin cuenta no hay ficha, solo el nombre y el teléfono que mandó la app si los tenía
+                enviados = {
+                    "nombre": nombre_sin_cuenta(datos.get("nombre")),
+                    "telefono": telefono_sin_cuenta(datos.get("telefono")),
+                    "alergias": "",
+                    "tipo_sangre": None,
+                    "contacto": None,
+                }
             conn.execute(
                 text("""
                     INSERT INTO emergencia

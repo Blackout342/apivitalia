@@ -135,6 +135,8 @@ class DatosEmergencia(BaseModel):
     """Copia de la ficha guardada con la emergencia. contacto es el primer contacto, o null."""
 
     nombre: str
+    # El teléfono de la persona. null en las que se guardaron antes de que existiera o si no lo mandó.
+    telefono: str | None = None
     alergias: str
     tipo_sangre: str | None
     contacto: str | None
