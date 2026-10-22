@@ -1,4 +1,4 @@
-"""Pruebas aisladas: nunca importar views ni usar configuracion de produccion."""
+"""Pruebas de citas sobre los endpoints de views, sin leer .env ni conectar MySQL."""
 
 import builtins
 import os
@@ -12,13 +12,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import jwt
-from fastapi import FastAPI, Header
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from sqlalchemy import (
     Column, DateTime, ForeignKey, Integer, MetaData, String, Table, Text,
-    create_engine, event, select, text,
+    create_engine, event, select,
 )
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -26,21 +23,25 @@ from sqlalchemy.pool import StaticPool
 
 
 ABRIR = builtins.open
+EXISTE = os.path.exists
 
 
 def abrir_sin_credenciales(archivo, *args, **kwargs):
+    """Corta cualquier lectura del .env real."""
     if isinstance(archivo, (str, os.PathLike)) and Path(archivo).name.startswith(".env"):
         raise AssertionError("Las pruebas no pueden leer .env")
     return ABRIR(archivo, *args, **kwargs)
 
 
-with (
-    patch("builtins.open", side_effect=abrir_sin_credenciales),
-    patch("sqlalchemy.create_engine", side_effect=AssertionError("Conexion durante import")),
-    patch.object(Engine, "connect", side_effect=AssertionError("Conexion durante import")),
-):
-    from citas import registrar_rutas_citas
-    from seguridad import ErrorAPI, usuario_desde_token
+def existe_sin_env(ruta):
+    """El arranque de views no debe encontrar el .env de esta carpeta."""
+    try:
+        nombre = Path(ruta).name
+    except TypeError:
+        return EXISTE(ruta)
+    if nombre.startswith(".env"):
+        return False
+    return EXISTE(ruta)
 
 
 USUARIO = "11111111-1111-4111-8111-111111111111"
@@ -48,6 +49,25 @@ OTRO = "22222222-2222-4222-8222-222222222222"
 INACTIVO = "33333333-3333-4333-8333-333333333333"
 SECRETO = "solo-pruebas-aisladas-no-es-una-clave-real-ni-se-usa-en-ningun-servidor"
 NUEVA = {"nombre_doctor": "Dra. Ana", "fecha_hora": "2026-10-22T15:00:00Z"}
+
+# Credenciales ficticias. views las toma al importarse y no abre la base.
+os.environ["DB_HOST"] = "127.0.0.1"
+os.environ["DB_PORT"] = "3306"
+os.environ["DB_NAME"] = "pruebas"
+os.environ["DB_USER"] = "pruebas"
+os.environ["DB_PASSWORD"] = "pruebas"
+os.environ["JWT_SECRETO"] = SECRETO
+os.environ["VITALIA_PREPARAR_ESQUEMA"] = "0"
+
+with (
+    patch("os.path.exists", side_effect=existe_sin_env),
+    patch("builtins.open", side_effect=abrir_sin_credenciales),
+    patch.object(Engine, "connect", side_effect=AssertionError("Conexion durante import")),
+    patch.object(Engine, "begin", side_effect=AssertionError("Transaccion durante import")),
+):
+    import views
+
+
 CLAVES = {
     "id", "usuario_id", "nombre_doctor", "especialidad_doctor", "telefono_doctor",
     "fecha_hora", "motivo", "lugar", "estado", "notas", "creado_en", "actualizado_en",
@@ -94,22 +114,23 @@ class CitasTest(unittest.TestCase):
                 {"id": INACTIVO, "activo": 0},
             ])
         self.momento = datetime(2026, 10, 22, 1, 2, 3)
+        # Los endpoints leen el engine y el reloj globales de views.
+        self._engine_previo = views.engine
+        self._ahora_previo = views.ahora
+        views.engine = self.engine
 
-        def usuario_actual(authorization: str | None = Header(default=None)):
-            return usuario_desde_token(authorization, SECRETO)
+        def reloj():
+            """Hora fija de la prueba. Cambia si el test avanza self.momento."""
+            return self.momento
 
-        app = FastAPI()
+        views.ahora = reloj
 
-        @app.exception_handler(ErrorAPI)
-        async def error_api(_, exc):
-            return JSONResponse(status_code=exc.codigo, content={"error": exc.mensaje})
+        def restaurar():
+            views.engine = self._engine_previo
+            views.ahora = self._ahora_previo
 
-        @app.exception_handler(RequestValidationError)
-        async def error_validacion(_, __):
-            return JSONResponse(status_code=422, content={"error": "Los datos enviados no son validos"})
-
-        registrar_rutas_citas(app, self.engine, usuario_actual, lambda: self.momento)
-        self.client = TestClient(app)
+        self.addCleanup(restaurar)
+        self.client = TestClient(views.app)
         self.addCleanup(self.client.close)
         self.base = f"/usuarios/{USUARIO}/citas"
         self.headers = self.autorizacion(USUARIO)
@@ -405,7 +426,7 @@ class CitasTest(unittest.TestCase):
                     self.assertIsNone(params[campo].tzinfo)
 
     def test_errores_sql_503_y_rollback(self):
-        with patch("citas.cita_del_usuario", side_effect=SQLAlchemyError("detalle interno no publico")):
+        with patch("views.cita_del_usuario", side_effect=SQLAlchemyError("detalle interno no publico")):
             with self.assertLogs(level="ERROR"):
                 respuesta = self.client.post(self.base, json=NUEVA, headers=self.headers)
         self.assertEqual(respuesta.status_code, 503)
@@ -436,33 +457,39 @@ class CitasTest(unittest.TestCase):
 
 
 class ImportacionSeguraTest(unittest.TestCase):
-    def test_importar_y_registrar_no_lee_env_ni_crea_conexiones(self):
+    def test_importar_views_no_lee_env_ni_conecta(self):
+        """Un intérprete nuevo importa views sin abrir .env ni la base."""
         programa = r'''
 import builtins
+import os
 import pathlib
-import sys
 from unittest.mock import patch
-from fastapi import FastAPI
 from sqlalchemy.engine import Engine
+os.environ["DB_HOST"] = "127.0.0.1"
+os.environ["DB_PORT"] = "3306"
+os.environ["DB_NAME"] = "pruebas"
+os.environ["DB_USER"] = "pruebas"
+os.environ["DB_PASSWORD"] = "pruebas"
+os.environ["JWT_SECRETO"] = "solo-pruebas"
+os.environ["VITALIA_PREPARAR_ESQUEMA"] = "0"
 abrir = builtins.open
+existe = os.path.exists
 def sin_env(archivo, *args, **kwargs):
     if isinstance(archivo, (str, pathlib.Path)) and pathlib.Path(archivo).name.startswith('.env'):
         raise AssertionError('No leer credenciales')
     return abrir(archivo, *args, **kwargs)
-with patch('builtins.open', side_effect=sin_env), \
-     patch('sqlalchemy.create_engine', side_effect=AssertionError('No crear engine')), \
+def existe_sin_env(ruta):
+    if pathlib.Path(ruta).name.startswith('.env'):
+        return False
+    return existe(ruta)
+with patch('os.path.exists', side_effect=existe_sin_env), \
+     patch('builtins.open', side_effect=sin_env), \
      patch.object(Engine, 'connect', side_effect=AssertionError('No conectar')), \
      patch.object(Engine, 'begin', side_effect=AssertionError('No iniciar transaccion')):
-    from citas import registrar_rutas_citas
-    app = FastAPI()
-    def usuario_actual():
-        raise AssertionError('No autenticar al registrar')
-    def ahora():
-        raise AssertionError('No escribir al registrar')
-    registrar_rutas_citas(app, object(), usuario_actual, ahora)
-    app.openapi()
-    assert 'views' not in sys.modules
-    assert 'pymysql' not in sys.modules
+    import views
+    rutas = {getattr(ruta, 'path', None) for ruta in views.app.routes}
+    assert '/usuarios/{usuario_id}/citas' in rutas
+    assert '/usuarios/{usuario_id}/citas/{cita_id}' in rutas
 '''
         respuesta = subprocess.run(
             [sys.executable, "-c", programa], cwd=Path(__file__).resolve().parents[1],

@@ -1,6 +1,6 @@
 # API Vitalia
 
-Cuenta, sesión, perfil, historial, contactos, citas, medicinas y emergencias. Las rutas están en `views.py` y `citas.py`, la forma del JSON en `models.py` y la validación JWT compartida en `seguridad.py`.
+Cuenta, sesión, perfil, historial, contactos, citas, medicinas y emergencias. Todos los endpoints están en `views.py` y la forma del JSON en `models.py`.
 
 ## Cómo correrla
 
@@ -184,7 +184,7 @@ python3 -m venv /tmp/vitalia-citas-venv
 /tmp/vitalia-citas-venv/bin/python -m unittest discover -s tests -v
 ```
 
-No arrancan `views:app`, no importan `views`, no leen `.env` y no conectan MySQL. Usan unittest, TestClient, JWT reales con secreto ficticio y SQLite en memoria con foreign keys activas. `citas.registrar_rutas_citas` recibe el engine, autenticación y reloj; importar o registrar rutas no inicia conexiones ni ejecuta DDL. Hay protecciones explícitas contra lectura de `.env` y creación/conexión de engines durante importación, incluidas pruebas en un intérprete nuevo.
+No arrancan el servidor. Importan `views` con `VITALIA_PREPARAR_ESQUEMA=0`, credenciales ficticias y sin leer `.env`. No conectan MySQL. Usan unittest, TestClient, JWT reales con secreto ficticio y SQLite en memoria con foreign keys activas. Durante la prueba el engine y el reloj de `views` apuntan a esa base y a un reloj fijo. Hay protecciones explícitas contra lectura de `.env` y contra conexiones durante la importación, incluidas pruebas en un intérprete nuevo.
 
 Dependencias: no se agrega ninguna librería de producción; `zoneinfo` está en Python 3.10+. El sistema debe tener la base IANA que incluya `America/Monterrey`; en sistemas sin ella instalar `tzdata`. Para pruebas, `requirements-dev.txt` incluye las dependencias actuales y agrega `httpx` para TestClient; unittest y SQLite vienen con Python. SQLite verifica comportamiento y FK; no sustituye una prueba de despliegue sobre un MySQL desechable con el esquema real.
 

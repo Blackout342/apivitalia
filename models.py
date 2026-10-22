@@ -151,3 +151,12 @@ class EmergenciaRespuesta(BaseModel):
     telefono_llamado: str
     datos_enviados: DatosEmergencia
     creado_en: datetime
+
+
+class AvisoRespuesta(BaseModel):
+    """Aviso de la cuenta. Lo ven todos los celulares que entraron con ella."""
+
+    id: str
+    titulo: str
+    contenido: str
+    creado_en: datetime
