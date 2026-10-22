@@ -1,6 +1,6 @@
 # API Vitalia
 
-Cuenta, sesión, perfil, historial, contactos, medicinas y emergencias. Las rutas están en `views.py` y la forma del JSON en `models.py`.
+Cuenta, sesión, perfil, historial, contactos, citas, medicinas y emergencias. Todos los endpoints están en `views.py` y la forma del JSON en `models.py`.
 
 ## Cómo correrla
 
@@ -25,9 +25,10 @@ Necesita Python 3.10 o más nuevo. Con [uv](https://docs.astral.sh/uv/) se baja 
    DB_PASSWORD=
    JWT_SECRETO=
    CRUZ_ROJA_CLAVE=
+   VITALIA_PREPARAR_ESQUEMA=0
    ```
 
-   La base es MySQL y la conexión usa SSL. Para `JWT_SECRETO` sirve cualquier texto largo, por ejemplo el que da `python3 -c "import secrets; print(secrets.token_urlsafe(48))"`. Si falta algún dato, la API no arranca y dice cuál (`Falta DB_HOST.`). Las tablas y el catálogo de enfermedades se crean solos al arrancar.
+   La base es MySQL y la conexión usa SSL. Para `JWT_SECRETO` sirve cualquier texto largo, por ejemplo el que da `python3 -c "import secrets; print(secrets.token_urlsafe(48))"`. Si falta algún dato, la API no arranca y dice cuál (`Falta DB_HOST.`). Con `VITALIA_PREPARAR_ESQUEMA=0` el arranque no crea/altera tablas ni actualiza catálogos: usa el esquema existente. Si se omite la variable, conserva la preparación automática anterior; úsala solo cuando corresponda administrar ese esquema.
 
 3. Arranca la API:
 
@@ -121,6 +122,71 @@ Con token. Solo si el contacto es de su usuario. Mismos campos, parciales. 200 c
 ### `DELETE /contactos/{id}`
 
 Con token. Solo el dueño. 204.
+
+### Citas (Sprint 1)
+
+Todas las rutas piden el JWT existente y que `usuario_id` sea su propio UUID. Verifican que la cuenta exista y siga activa, incluso si el token fue emitido antes de darla de baja. Los errores mantienen `{ "error": "mensaje" }`.
+
+| Método | Ruta | Resultado |
+| --- | --- | --- |
+| GET | `/usuarios/{usuario_id}/citas` | 200, arreglo ordenado por `fecha_hora`, luego `id`; vacío si no hay citas |
+| POST | `/usuarios/{usuario_id}/citas` | 201, cita creada |
+| GET | `/usuarios/{usuario_id}/citas/{cita_id}` | 200, cita del usuario |
+| PATCH | `/usuarios/{usuario_id}/citas/{cita_id}` | 200, cita actualizada; solo modifica campos enviados |
+| DELETE | `/usuarios/{usuario_id}/citas/{cita_id}` | 204 sin cuerpo |
+
+Ejemplo de POST, con UUID enviado por iOS (también se genera uno si se omite `id`):
+
+```json
+{
+  "id": "40ca19fe-bc02-4415-b80d-72584287a7de",
+  "nombre_doctor": "Dra. Ana López",
+  "especialidad_doctor": "Cardiología",
+  "telefono_doctor": "+528112345678",
+  "fecha_hora": "2026-10-22T09:00:00-06:00",
+  "motivo": "Control",
+  "lugar": "Consultorio 2",
+  "estado": "programada",
+  "notas": "Llevar estudios"
+}
+```
+
+La respuesta de POST/GET/PATCH contiene siempre `id`, `usuario_id`, `nombre_doctor`, `especialidad_doctor`, `telefono_doctor`, `fecha_hora`, `motivo`, `lugar`, `estado`, `notas`, `creado_en`, `actualizado_en`. Las tres fechas son ISO8601 con zona explícita: `fecha_hora` lleva el offset de Monterrey y la auditoría UTC (`Z` o `+00:00`). Los opcionales ausentes, vacíos o enviados como `null` se guardan/devuelven como `null`.
+
+Validación: `nombre_doctor` obligatorio, no vacío, máximo 150 caracteres; `fecha_hora` obligatoria; `especialidad_doctor` máximo 100, `telefono_doctor` 15, `motivo` y `lugar` 255. `notas` es texto, máximo 65535 bytes UTF-8 (límite MySQL TEXT). Se recortan espacios externos. `estado` solo acepta `programada` (predeterminado), `realizada` o `cancelada`. Los estados no borran registros. PATCH permite esos mismos campos editables, no `id`, `usuario_id` ni fechas de auditoría; los campos desconocidos también se rechazan. PATCH `{}` devuelve la cita sin cambiar auditoría.
+
+Un UUID duplicado devuelve 409 sin sobrescribir. Ante una respuesta perdida, el cliente puede hacer GET del mismo UUID y comparar los campos normalizados; el 409 por sí solo no confirma que el contenido coincida. Un UUID de otra cuenta no se expone por GET/PATCH/DELETE: devuelve 404 dentro de la ruta propia.
+
+- 401: falta JWT, firma/formato inválido o sesión vencida; conserva los mensajes de autenticación existentes.
+- 403: el JWT pertenece a otra cuenta o la cuenta está inactiva.
+- 404: no existe la cuenta o no existe la cita dentro de esa cuenta.
+- 409: UUID de cita ya registrado (también ante una carrera de inserciones).
+- 422: UUID inválido, campos inválidos/inmutables, fechas sin offset o intervalo inválido.
+- 503: error de base de datos; las escrituras se revierten y no se exponen detalles SQL.
+
+#### Fechas y Compatibilidad
+
+**Decisión de almacenamiento:** `cita.fecha_hora` sigue siendo un DATETIME sin zona que representa **hora de pared de `America/Monterrey`**, no UTC. La API exige ISO8601 con `Z` o un offset numérico `±HH:MM`, convierte ese instante a Monterrey y guarda sus componentes locales sin zona. Por ejemplo `2026-10-22T15:00:00Z` se guarda como `2026-10-22 09:00:00` y se devuelve como `2026-10-22T09:00:00-06:00`. No acepta fechas sin zona, fechas solas ni `-00:00` (offset desconocido). Acepta hasta seis decimales de segundo y descarta fracciones al guardar, porque el DATETIME existente tiene precisión de segundos.
+
+`creado_en` y `actualizado_en` se siguen guardando como UTC sin zona y se devuelven con UTC explícito. No se cambia la sesión MySQL UTC ni el consumidor de recetas/medicinas: este sigue leyendo la hora local existente directamente. El offset de citas se obtiene de `zoneinfo`, no de una constante: respeta las reglas históricas de Monterrey. Los DATETIME históricos no distinguen las horas repetidas durante antiguos cambios de horario; no se inventa ni recupera esa información.
+
+GET de colección admite `desde` y/o `hasta`, con la misma exigencia de offset, y aplica el intervalo semiabierto **`desde <= fecha_hora < hasta`** después de convertir los límites a hora local de Monterrey. Si vienen ambos, `desde` debe preceder a `hasta`. Las fracciones de los filtros sí se conservan para comparar con los segundos almacenados. En URLs, codificar `+` como `%2B` o usar un cliente que codifique query params.
+
+Ejemplo: `/usuarios/{usuario_id}/citas?desde=2026-10-22T00:00:00-06:00&hasta=2026-10-23T00:00:00-06:00`.
+
+**Antes de desplegar, confirmar con quien administra la base que los valores existentes de `cita.fecha_hora` ya usan hora de pared de Monterrey**, y que `medicina.cita_id` tiene `ON DELETE SET NULL`. Esta implementación asume el esquema de cita acordado y esa FK existente; no crea/altera esas tablas, no migra ni convierte datos existentes y no se verificó contra la base compartida. DELETE borra solo la cita: la FK anula su referencia y conserva las medicinas. No se modifican las rutas ni el esquema de medicinas.
+
+#### Pruebas Aisladas
+
+```bash
+python3 -m venv /tmp/vitalia-citas-venv
+/tmp/vitalia-citas-venv/bin/python -m pip install -r requirements-dev.txt
+/tmp/vitalia-citas-venv/bin/python -m unittest discover -s tests -v
+```
+
+No arrancan el servidor. Importan `views` con `VITALIA_PREPARAR_ESQUEMA=0`, credenciales ficticias y sin leer `.env`. No conectan MySQL. Usan unittest, TestClient, JWT reales con secreto ficticio y SQLite en memoria con foreign keys activas. Durante la prueba el engine y el reloj de `views` apuntan a esa base y a un reloj fijo. Hay protecciones explícitas contra lectura de `.env` y contra conexiones durante la importación, incluidas pruebas en un intérprete nuevo.
+
+Dependencias: no se agrega ninguna librería de producción; `zoneinfo` está en Python 3.10+. El sistema debe tener la base IANA que incluya `America/Monterrey`; en sistemas sin ella instalar `tzdata`. Para pruebas, `requirements-dev.txt` incluye las dependencias actuales y agrega `httpx` para TestClient; unittest y SQLite vienen con Python. SQLite verifica comportamiento y FK; no sustituye una prueba de despliegue sobre un MySQL desechable con el esquema real.
 
 ### `GET /usuarios/{id}/medicinas`
 

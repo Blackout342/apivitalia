@@ -1,15 +1,18 @@
-"""API de cuenta, sesión, perfil, historial, contactos, medicinas y emergencias.
+"""API de cuenta, sesión, perfil, historial, contactos, citas, medicinas y emergencias.
 
-No incluye citas. La forma del JSON está en models.py.
+La forma del JSON está en models.py. Todos los endpoints están en este archivo.
 """
 
 import json
 import logging
 import os
+import re
 import secrets
 import uuid
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import quote_plus
+from zoneinfo import ZoneInfo
 
 import bcrypt
 import jwt
@@ -17,10 +20,12 @@ from fastapi import Body, Depends, FastAPI, Header, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import create_engine, event, text
+from sqlalchemy import DateTime, bindparam, create_engine, event, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from models import (
+    AvisoRespuesta,
+    CitaRespuesta,
     ContactoRespuesta,
     EmergenciaRespuesta,
     EnfermedadRespuesta,
@@ -28,8 +33,40 @@ from models import (
     SesionRespuesta,
     UsuarioRespuesta,
 )
-
 app = FastAPI(title="Vitalia")
+
+
+class ErrorAPI(Exception):
+    """Error de negocio. El cliente siempre recibe {"error": "..."}."""
+
+    def __init__(self, codigo: int, mensaje: str):
+        self.codigo = codigo
+        self.mensaje = mensaje
+
+
+def usuario_desde_token(authorization: str | None, secreto: str, algoritmo: str = "HS256") -> str:
+    """Saca el id del usuario de Authorization: Bearer <token>."""
+    if not authorization:
+        raise ErrorAPI(401, "Falta el token")
+    partes = authorization.split(" ", 1)
+    if len(partes) != 2 or partes[0].lower() != "bearer" or not partes[1].strip():
+        raise ErrorAPI(401, "Falta el token")
+    try:
+        datos = jwt.decode(partes[1].strip(), secreto, algorithms=[algoritmo])
+    except jwt.ExpiredSignatureError:
+        raise ErrorAPI(401, "La sesión venció")
+    except jwt.PyJWTError:
+        raise ErrorAPI(401, "El token no es válido")
+    usuario_id = datos.get("sub")
+    if not isinstance(usuario_id, str) or not usuario_id:
+        raise ErrorAPI(401, "El token no es válido")
+    return usuario_id
+
+
+def exigir_propio(token_id: str, ruta_id: str) -> None:
+    """El token solo puede leer y escribir su propia cuenta."""
+    if token_id != ruta_id:
+        raise ErrorAPI(403, "No tienes acceso a esta cuenta")
 
 
 def cargar_env() -> None:
@@ -109,14 +146,6 @@ def fijar_utc(conexion, _):
     cursor.close()
 
 
-class ErrorAPI(Exception):
-    """Error de negocio. El cliente siempre recibe {"error": "..."}."""
-
-    def __init__(self, codigo: int, mensaje: str):
-        self.codigo = codigo
-        self.mensaje = mensaje
-
-
 def ahora() -> datetime:
     """Hora UTC sin zona, que es lo que guarda un DATETIME de MySQL."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
@@ -146,27 +175,7 @@ def crear_token(usuario_id: str) -> str:
 
 def usuario_actual(authorization: str | None = Header(default=None)) -> str:
     """Lee Authorization: Bearer <token> y regresa el usuario_id del token."""
-    if not authorization:
-        raise ErrorAPI(401, "Falta el token")
-    partes = authorization.split(" ", 1)
-    if len(partes) != 2 or partes[0].lower() != "bearer" or not partes[1].strip():
-        raise ErrorAPI(401, "Falta el token")
-    try:
-        datos = jwt.decode(partes[1].strip(), JWT_SECRETO, algorithms=[JWT_ALGORITMO])
-    except jwt.ExpiredSignatureError:
-        raise ErrorAPI(401, "La sesión venció")
-    except jwt.PyJWTError:
-        raise ErrorAPI(401, "El token no es válido")
-    usuario_id = datos.get("sub")
-    if not isinstance(usuario_id, str) or not usuario_id:
-        raise ErrorAPI(401, "El token no es válido")
-    return usuario_id
-
-
-def exigir_propio(token_id: str, ruta_id: str) -> None:
-    """Un token no lee ni escribe la cuenta de otra persona."""
-    if token_id != ruta_id:
-        raise ErrorAPI(403, "No tienes acceso a esta cuenta")
+    return usuario_desde_token(authorization, JWT_SECRETO, JWT_ALGORITMO)
 
 
 def leer_telefono(valor) -> str:
@@ -538,6 +547,20 @@ def asegurar_esquema() -> None:
                 PRIMARY KEY (id),
                 KEY idx_emergencia_usuario (usuario_id, creado_en),
                 CONSTRAINT fk_emergencia_usuario
+                    FOREIGN KEY (usuario_id) REFERENCES usuario (id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """))
+        # Un SOS queda aquí para que cualquier celular con esta cuenta lo lea.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS aviso (
+                id CHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+                usuario_id CHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+                titulo VARCHAR(120) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+                contenido VARCHAR(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+                creado_en DATETIME NOT NULL,
+                PRIMARY KEY (id),
+                KEY idx_aviso_usuario (usuario_id, creado_en),
+                CONSTRAINT fk_aviso_usuario
                     FOREIGN KEY (usuario_id) REFERENCES usuario (id) ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """))
@@ -1348,6 +1371,27 @@ def guardar_emergencia(usuario_id: str | None, datos: dict) -> dict:
         logging.exception("No se pudo guardar la emergencia")
         raise ErrorAPI(503, "No se pudo guardar la emergencia")
 
+    # El aviso no puede tumbar la emergencia: si la tabla aún no existe, Cruz Roja igual la tiene.
+    if usuario_id:
+        nombre = (enviados.get("nombre") or "").strip() or "Alguien"
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("""
+                        INSERT INTO aviso (id, usuario_id, titulo, contenido, creado_en)
+                        VALUES (:id, :usuario_id, :titulo, :contenido, :creado_en)
+                    """),
+                    {
+                        "id": str(uuid.uuid4()),
+                        "usuario_id": usuario_id,
+                        "titulo": "Botón de SOS",
+                        "contenido": f"{nombre} pidió ayuda.",
+                        "creado_en": creado_en,
+                    },
+                )
+        except SQLAlchemyError:
+            logging.exception("No se pudo guardar el aviso de SOS")
+
     return {
         "id": emergencia_id,
         "usuario_id": usuario_id,
@@ -1395,4 +1439,282 @@ def listar_emergencias():
     return emergencias
 
 
-asegurar_esquema()
+@app.get("/usuarios/{usuario_id}/avisos", response_model=list[AvisoRespuesta])
+def listar_avisos(usuario_id: str, token_id: str = Depends(usuario_actual)):
+    """Los SOS de esta cuenta, el más nuevo primero. Cualquier celular con la sesión los lee."""
+    exigir_propio(token_id, usuario_id)
+    try:
+        with engine.connect() as conn:
+            filas = conn.execute(
+                text("""
+                    SELECT id, titulo, contenido, creado_en
+                    FROM aviso
+                    WHERE usuario_id = :usuario_id
+                    ORDER BY creado_en DESC, id
+                    LIMIT 30
+                """),
+                {"usuario_id": usuario_id},
+            ).mappings().all()
+    except SQLAlchemyError:
+        logging.exception("No se pudieron leer los avisos")
+        raise ErrorAPI(503, "No se pudo consultar la base de datos")
+    return [dict(fila) for fila in filas]
+
+
+# Citas. Usan el mismo token y la misma base que el resto de los endpoints.
+ZONA_CITAS = ZoneInfo("America/Monterrey")
+ESTADOS_CITA = {"programada", "realizada", "cancelada"}
+LIMITES_CITA = {
+    "nombre_doctor": 150,
+    "especialidad_doctor": 100,
+    "telefono_doctor": 15,
+    "motivo": 255,
+    "lugar": 255,
+    "notas": 65535,
+}
+CAMPOS_CITA = set(LIMITES_CITA) | {"fecha_hora", "estado"}
+ISO_CON_ZONA = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}"
+    r"(?:\.[0-9]{1,6})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])"
+)
+SELECT_CITAS = """
+    SELECT id, usuario_id, nombre_doctor, especialidad_doctor, telefono_doctor,
+           fecha_hora, motivo, lugar, estado, notas, creado_en, actualizado_en
+    FROM cita
+"""
+
+
+def leer_id_cita(valor) -> str:
+    """Acepta un UUID de cita. Otro valor no llega a la base."""
+    if isinstance(valor, str):
+        try:
+            return str(uuid.UUID(valor))
+        except ValueError:
+            pass
+    raise ErrorAPI(422, "El id de la cita no es valido")
+
+
+def exigir_usuario_cita(token_id: str, usuario_id: str) -> None:
+    """La ruta tiene que ser la cuenta del token y un UUID."""
+    exigir_propio(token_id, usuario_id)
+    try:
+        if len(usuario_id) == 36 and str(uuid.UUID(usuario_id)) == usuario_id.lower():
+            return
+    except ValueError:
+        pass
+    raise ErrorAPI(422, "El id del usuario no es valido")
+
+
+def leer_instante_cita(valor, campo: str) -> datetime:
+    """Exige offset; convierte el instante a Monterrey antes de quitar la zona."""
+    mensaje = f"{campo} debe ser ISO8601 con offset explicito, por ejemplo 2026-10-22T09:00:00-06:00"
+    if not isinstance(valor, str) or not ISO_CON_ZONA.fullmatch(valor) or valor.endswith("-00:00"):
+        raise ErrorAPI(422, mensaje)
+    try:
+        local = datetime.fromisoformat(valor.replace("Z", "+00:00")).astimezone(ZONA_CITAS)
+    except (ValueError, OverflowError):
+        raise ErrorAPI(422, mensaje)
+    if local.year < 1000:
+        raise ErrorAPI(422, f"{campo} esta fuera del rango DATETIME")
+    return local.replace(tzinfo=None)
+
+
+def leer_cambios_cita(datos: dict, *, nueva: bool = False) -> dict:
+    """Deja solo los campos editables de una cita, ya recortados."""
+    permitidos = CAMPOS_CITA | ({"id"} if nueva else set())
+    if set(datos) - permitidos:
+        raise ErrorAPI(422, "Hay campos desconocidos o inmutables en la cita")
+    if nueva and not {"nombre_doctor", "fecha_hora"} <= set(datos):
+        raise ErrorAPI(422, "nombre_doctor y fecha_hora son obligatorios")
+    cambios = {}
+    for campo, limite in LIMITES_CITA.items():
+        if campo not in datos:
+            continue
+        valor = datos[campo]
+        if valor is None and campo != "nombre_doctor":
+            cambios[campo] = None
+            continue
+        if not isinstance(valor, str):
+            raise ErrorAPI(422, f"{campo} debe ser texto")
+        valor = valor.strip()
+        if campo == "nombre_doctor" and not valor:
+            raise ErrorAPI(422, "El nombre del doctor es obligatorio")
+        if len(valor) > limite or (campo == "notas" and len(valor.encode("utf-8")) > limite):
+            raise ErrorAPI(422, f"{campo} es demasiado largo")
+        cambios[campo] = valor or None
+    if "fecha_hora" in datos:
+        # El DATETIME existente no tiene precision fraccionaria.
+        cambios["fecha_hora"] = leer_instante_cita(datos["fecha_hora"], "fecha_hora").replace(microsecond=0)
+    if "estado" in datos:
+        if not isinstance(datos["estado"], str) or datos["estado"] not in ESTADOS_CITA:
+            raise ErrorAPI(422, "El estado debe ser programada, realizada o cancelada")
+        cambios["estado"] = datos["estado"]
+    return cambios
+
+
+def cuenta_activa_cita(conn, usuario_id: str) -> None:
+    """La cita solo se toca si la cuenta existe y sigue activa."""
+    activo = conn.execute(
+        text("SELECT activo FROM usuario WHERE id = :usuario_id"), {"usuario_id": usuario_id}
+    ).scalar()
+    if activo is None:
+        raise ErrorAPI(404, "No existe esa cuenta")
+    if not int(activo):
+        raise ErrorAPI(403, "La cuenta esta inactiva")
+
+
+def consulta_citas(sql: str):
+    """Marca las fechas para que no se lean como texto."""
+    return text(sql).columns(fecha_hora=DateTime(), creado_en=DateTime(), actualizado_en=DateTime())
+
+
+def respuesta_cita(fila) -> dict:
+    """fecha_hora sale en Monterrey; la auditoría sale en UTC."""
+    return dict(
+        fila,
+        fecha_hora=fila["fecha_hora"].replace(tzinfo=ZONA_CITAS),
+        creado_en=fila["creado_en"].replace(tzinfo=timezone.utc),
+        actualizado_en=fila["actualizado_en"].replace(tzinfo=timezone.utc),
+    )
+
+
+def cita_del_usuario(conn, usuario_id: str, cita_id: str):
+    """Una cita de otra cuenta responde como si no existiera."""
+    fila = conn.execute(
+        consulta_citas(SELECT_CITAS + " WHERE usuario_id = :usuario_id AND id = :id"),
+        {"usuario_id": usuario_id, "id": cita_id},
+    ).mappings().first()
+    if fila is None:
+        raise ErrorAPI(404, "No existe esa cita")
+    return fila
+
+
+@contextmanager
+def operacion_citas():
+    """Una transacción de citas. Un fallo de base se responde 503."""
+    try:
+        with engine.begin() as conn:
+            yield conn
+    except SQLAlchemyError:
+        logging.exception("No se pudo completar la operacion de citas")
+        raise ErrorAPI(503, "No se pudo completar la operacion")
+
+
+@app.get("/usuarios/{usuario_id}/citas", response_model=list[CitaRespuesta])
+def listar_citas(
+    usuario_id: str,
+    desde: str | None = None,
+    hasta: str | None = None,
+    token_id: str = Depends(usuario_actual),
+):
+    """Citas de la cuenta, de la más próxima a la más lejana."""
+    exigir_usuario_cita(token_id, usuario_id)
+    params = {"usuario_id": usuario_id}
+    condiciones = ["usuario_id = :usuario_id"]
+    for campo, valor, operador in (("desde", desde, ">="), ("hasta", hasta, "<")):
+        if valor is not None:
+            params[campo] = leer_instante_cita(valor, campo)
+            condiciones.append(f"fecha_hora {operador} :{campo}")
+    if desde is not None and hasta is not None and params["desde"] >= params["hasta"]:
+        raise ErrorAPI(422, "desde debe ser anterior a hasta")
+    query = consulta_citas(
+        SELECT_CITAS + " WHERE " + " AND ".join(condiciones) + " ORDER BY fecha_hora, id"
+    ).bindparams(*(bindparam(campo, type_=DateTime()) for campo in ("desde", "hasta") if campo in params))
+    with operacion_citas() as conn:
+        cuenta_activa_cita(conn, usuario_id)
+        filas = conn.execute(query, params).mappings().all()
+        return [respuesta_cita(fila) for fila in filas]
+
+
+@app.post("/usuarios/{usuario_id}/citas", response_model=CitaRespuesta, status_code=201)
+def crear_cita(usuario_id: str, datos: dict = Body(...), token_id: str = Depends(usuario_actual)):
+    """Crea la cita. Si el celular manda id, se guarda ese mismo."""
+    exigir_usuario_cita(token_id, usuario_id)
+    cambios = leer_cambios_cita(datos, nueva=True)
+    cita_id = leer_id_cita(datos["id"]) if "id" in datos else str(uuid.uuid4())
+    momento = ahora().replace(microsecond=0)
+    nueva = {campo: None for campo in LIMITES_CITA}
+    nueva.update(cambios)
+    nueva.update(
+        id=cita_id, usuario_id=usuario_id, creado_en=momento, actualizado_en=momento,
+        estado=cambios.get("estado", "programada"),
+    )
+    with operacion_citas() as conn:
+        cuenta_activa_cita(conn, usuario_id)
+        try:
+            conn.execute(
+                text("""
+                    INSERT INTO cita (
+                        id, usuario_id, nombre_doctor, especialidad_doctor, telefono_doctor,
+                        fecha_hora, motivo, lugar, estado, notas, creado_en, actualizado_en
+                    ) VALUES (
+                        :id, :usuario_id, :nombre_doctor, :especialidad_doctor, :telefono_doctor,
+                        :fecha_hora, :motivo, :lugar, :estado, :notas, :creado_en, :actualizado_en
+                    )
+                """).bindparams(*(bindparam(campo, type_=DateTime()) for campo in (
+                    "fecha_hora", "creado_en", "actualizado_en"
+                ))),
+                nueva,
+            )
+        except IntegrityError as exc:
+            # MySQL 1062 y SQLite PRIMARYKEY/UNIQUE, incluso ante inserciones concurrentes.
+            if (getattr(exc.orig, "args", (None,))[0] == 1062
+                    or getattr(exc.orig, "sqlite_errorcode", None) in (1555, 2067)):
+                raise ErrorAPI(409, "Esa cita ya esta registrada")
+            raise
+        return respuesta_cita(cita_del_usuario(conn, usuario_id, cita_id))
+
+
+@app.get("/usuarios/{usuario_id}/citas/{cita_id}", response_model=CitaRespuesta)
+def obtener_cita(usuario_id: str, cita_id: str, token_id: str = Depends(usuario_actual)):
+    """Una cita de esta cuenta."""
+    exigir_usuario_cita(token_id, usuario_id)
+    cita_id = leer_id_cita(cita_id)
+    with operacion_citas() as conn:
+        cuenta_activa_cita(conn, usuario_id)
+        return respuesta_cita(cita_del_usuario(conn, usuario_id, cita_id))
+
+
+@app.patch("/usuarios/{usuario_id}/citas/{cita_id}", response_model=CitaRespuesta)
+def actualizar_cita(
+    usuario_id: str, cita_id: str, datos: dict = Body(...), token_id: str = Depends(usuario_actual),
+):
+    """Cambia solo los campos que llegaron en el body."""
+    exigir_usuario_cita(token_id, usuario_id)
+    cita_id = leer_id_cita(cita_id)
+    cambios = leer_cambios_cita(datos)
+    with operacion_citas() as conn:
+        cuenta_activa_cita(conn, usuario_id)
+        cita_del_usuario(conn, usuario_id, cita_id)
+        if cambios:
+            cambios["actualizado_en"] = ahora().replace(microsecond=0)
+            # Las columnas vienen de leer_cambios_cita, nunca de claves arbitrarias del cliente.
+            asignaciones = ", ".join(f"{campo} = :{campo}" for campo in cambios)
+            query = text(
+                f"UPDATE cita SET {asignaciones} WHERE usuario_id = :usuario_id AND id = :id"
+            ).bindparams(*(bindparam(campo, type_=DateTime()) for campo in (
+                "fecha_hora", "actualizado_en"
+            ) if campo in cambios))
+            conn.execute(query, {**cambios, "usuario_id": usuario_id, "id": cita_id})
+        return respuesta_cita(cita_del_usuario(conn, usuario_id, cita_id))
+
+
+@app.delete("/usuarios/{usuario_id}/citas/{cita_id}", status_code=204)
+def borrar_cita(usuario_id: str, cita_id: str, token_id: str = Depends(usuario_actual)):
+    """Borra la cita. La medicina que salió de ella se queda, sin esa cita."""
+    exigir_usuario_cita(token_id, usuario_id)
+    cita_id = leer_id_cita(cita_id)
+    with operacion_citas() as conn:
+        cuenta_activa_cita(conn, usuario_id)
+        cita_del_usuario(conn, usuario_id, cita_id)
+        # La FK existente medicina.cita_id ON DELETE SET NULL conserva las medicinas.
+        conn.execute(
+            text("DELETE FROM cita WHERE usuario_id = :usuario_id AND id = :id"),
+            {"usuario_id": usuario_id, "id": cita_id},
+        )
+    return Response(status_code=204)
+
+
+# El arranque local puede usar el esquema existente sin ejecutar DDL ni semillas.
+if os.environ.get("VITALIA_PREPARAR_ESQUEMA", "1") == "1":
+    asegurar_esquema()

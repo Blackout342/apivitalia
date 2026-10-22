@@ -1,6 +1,7 @@
 """Forma del JSON que entra y sale. La validación en español vive en views.py."""
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -101,6 +102,23 @@ class RecetaInfo(BaseModel):
     fecha: datetime
 
 
+class CitaRespuesta(BaseModel):
+    """fecha_hora usa offset de Monterrey; las fechas de auditoria usan UTC."""
+
+    id: str
+    usuario_id: str
+    nombre_doctor: str
+    especialidad_doctor: str | None
+    telefono_doctor: str | None
+    fecha_hora: datetime
+    motivo: str | None
+    lugar: str | None
+    estado: Literal["programada", "realizada", "cancelada"]
+    notas: str | None
+    creado_en: datetime
+    actualizado_en: datetime
+
+
 class MedicinaRespuesta(BaseModel):
     """Medicina guardada, con las enfermedades para las que se toma y su receta si existe."""
 
@@ -134,4 +152,13 @@ class EmergenciaRespuesta(BaseModel):
     # "telefono" o "reloj". null en las que se guardaron antes de que existiera.
     origen: str | None = None
     datos_enviados: DatosEmergencia
+    creado_en: datetime
+
+
+class AvisoRespuesta(BaseModel):
+    """Aviso de la cuenta. Lo ven todos los celulares que entraron con ella."""
+
+    id: str
+    titulo: str
+    contenido: str
     creado_en: datetime
