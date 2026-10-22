@@ -546,6 +546,17 @@ def asegurar_esquema() -> None:
             ALTER TABLE emergencia
             MODIFY usuario_id CHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL
         """))
+        # De dónde se pidió la ayuda: "telefono" o "reloj". NULL en las que se guardaron antes de esta columna.
+        # MySQL no tiene ADD COLUMN IF NOT EXISTS, por eso primero se revisa si ya existe.
+        tiene_origen = conn.execute(text("""
+            SELECT COUNT(*) FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'emergencia' AND COLUMN_NAME = 'origen'
+        """)).scalar()
+        if not tiene_origen:
+            conn.execute(text("""
+                ALTER TABLE emergencia
+                ADD COLUMN origen VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL AFTER telefono_llamado
+            """))
         # NULL significa «No sé». La columna ya podía serlo; se deja explícito.
         conn.execute(text("""
             ALTER TABLE historial_medico
@@ -1294,11 +1305,17 @@ def registrar_emergencia_sin_cuenta(datos: dict = Body(...)):
     return guardar_emergencia(None, datos)
 
 
+# Lo que puede venir en "origen" del body de una emergencia.
+ORIGENES = {"telefono", "reloj"}
+
+
 def guardar_emergencia(usuario_id: str | None, datos: dict) -> dict:
     """Sin cuenta no hay ficha que copiar, así que datos_enviados va vacío."""
     latitud = leer_coordenada(datos.get("latitud"), 90, "La latitud no es válida")
     longitud = leer_coordenada(datos.get("longitud"), 180, "La longitud no es válida")
     telefono_llamado = leer_telefono_llamado(datos.get("telefono_llamado"))
+    # Opcional. Cualquier otro valor se guarda como NULL en vez de rechazar la emergencia.
+    origen = datos.get("origen") if datos.get("origen") in ORIGENES else None
     emergencia_id = str(uuid.uuid4())
     creado_en = ahora().replace(microsecond=0)
     try:
@@ -1310,9 +1327,9 @@ def guardar_emergencia(usuario_id: str | None, datos: dict) -> dict:
             conn.execute(
                 text("""
                     INSERT INTO emergencia
-                        (id, usuario_id, latitud, longitud, telefono_llamado, datos_enviados, creado_en)
+                        (id, usuario_id, latitud, longitud, telefono_llamado, origen, datos_enviados, creado_en)
                     VALUES
-                        (:id, :usuario_id, :latitud, :longitud, :telefono_llamado, :datos_enviados, :creado_en)
+                        (:id, :usuario_id, :latitud, :longitud, :telefono_llamado, :origen, :datos_enviados, :creado_en)
                 """),
                 {
                     "id": emergencia_id,
@@ -1320,6 +1337,7 @@ def guardar_emergencia(usuario_id: str | None, datos: dict) -> dict:
                     "latitud": latitud,
                     "longitud": longitud,
                     "telefono_llamado": telefono_llamado,
+                    "origen": origen,
                     "datos_enviados": json.dumps(enviados, ensure_ascii=False),
                     "creado_en": creado_en,
                 },
@@ -1336,6 +1354,7 @@ def guardar_emergencia(usuario_id: str | None, datos: dict) -> dict:
         "latitud": latitud,
         "longitud": longitud,
         "telefono_llamado": telefono_llamado,
+        "origen": origen,
         "datos_enviados": enviados,
         "creado_en": creado_en,
     }
@@ -1358,7 +1377,7 @@ def listar_emergencias():
     try:
         with engine.connect() as conn:
             filas = conn.execute(text("""
-                SELECT id, usuario_id, latitud, longitud, telefono_llamado, datos_enviados, creado_en
+                SELECT id, usuario_id, latitud, longitud, telefono_llamado, origen, datos_enviados, creado_en
                 FROM emergencia
                 ORDER BY creado_en DESC, id
             """)).mappings().all()

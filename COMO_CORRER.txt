@@ -1,0 +1,28 @@
+PRIMERA VEZ (instalar)
+
+uv venv --allow-existing --python 3.12 .venv -q && uv pip install -q -r requirements.txt
+
+
+CORRER SOLO EN LA MAC (simulador)
+
+.venv/bin/uvicorn views:app --reload
+
+
+CORRER PARA IPHONE / RELOJ EN LA MISMA RED
+
+.venv/bin/uvicorn views:app --reload --host 0.0.0.0
+
+
+VER LA IP DE LA MAC (va en APIConfig.swift como http://IP:8000)
+
+ipconfig getifaddr en0
+
+
+VER LA DOCUMENTACION
+
+open http://127.0.0.1:8000/docs
+
+
+APAGAR LA API
+
+lsof -ti tcp:8000 | xargs kill

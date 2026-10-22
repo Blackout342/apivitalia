@@ -131,5 +131,7 @@ class EmergenciaRespuesta(BaseModel):
     latitud: float
     longitud: float
     telefono_llamado: str
+    # "telefono" o "reloj". null en las que se guardaron antes de que existiera.
+    origen: str | None = None
     datos_enviados: DatosEmergencia
     creado_en: datetime
