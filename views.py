@@ -1,6 +1,6 @@
-"""API de cuenta, sesión, perfil, historial, contactos, medicinas y emergencias.
+"""API de cuenta, sesión, perfil, historial, contactos, citas, medicinas y emergencias.
 
-No incluye citas. La forma del JSON está en models.py.
+La forma del JSON está en models.py. Las rutas de citas están en citas.py.
 """
 
 import json
@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
+from citas import registrar_rutas_citas
 from models import (
     ContactoRespuesta,
     EmergenciaRespuesta,
@@ -28,6 +29,7 @@ from models import (
     SesionRespuesta,
     UsuarioRespuesta,
 )
+from seguridad import ErrorAPI, exigir_propio, usuario_desde_token
 
 app = FastAPI(title="Vitalia")
 
@@ -109,14 +111,6 @@ def fijar_utc(conexion, _):
     cursor.close()
 
 
-class ErrorAPI(Exception):
-    """Error de negocio. El cliente siempre recibe {"error": "..."}."""
-
-    def __init__(self, codigo: int, mensaje: str):
-        self.codigo = codigo
-        self.mensaje = mensaje
-
-
 def ahora() -> datetime:
     """Hora UTC sin zona, que es lo que guarda un DATETIME de MySQL."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
@@ -146,27 +140,7 @@ def crear_token(usuario_id: str) -> str:
 
 def usuario_actual(authorization: str | None = Header(default=None)) -> str:
     """Lee Authorization: Bearer <token> y regresa el usuario_id del token."""
-    if not authorization:
-        raise ErrorAPI(401, "Falta el token")
-    partes = authorization.split(" ", 1)
-    if len(partes) != 2 or partes[0].lower() != "bearer" or not partes[1].strip():
-        raise ErrorAPI(401, "Falta el token")
-    try:
-        datos = jwt.decode(partes[1].strip(), JWT_SECRETO, algorithms=[JWT_ALGORITMO])
-    except jwt.ExpiredSignatureError:
-        raise ErrorAPI(401, "La sesión venció")
-    except jwt.PyJWTError:
-        raise ErrorAPI(401, "El token no es válido")
-    usuario_id = datos.get("sub")
-    if not isinstance(usuario_id, str) or not usuario_id:
-        raise ErrorAPI(401, "El token no es válido")
-    return usuario_id
-
-
-def exigir_propio(token_id: str, ruta_id: str) -> None:
-    """Un token no lee ni escribe la cuenta de otra persona."""
-    if token_id != ruta_id:
-        raise ErrorAPI(403, "No tienes acceso a esta cuenta")
+    return usuario_desde_token(authorization, JWT_SECRETO, JWT_ALGORITMO)
 
 
 def leer_telefono(valor) -> str:
@@ -1376,4 +1350,8 @@ def listar_emergencias():
     return emergencias
 
 
-asegurar_esquema()
+registrar_rutas_citas(app, engine, usuario_actual, ahora)
+
+# El arranque local puede usar el esquema existente sin ejecutar DDL ni semillas.
+if os.environ.get("VITALIA_PREPARAR_ESQUEMA", "1") == "1":
+    asegurar_esquema()
