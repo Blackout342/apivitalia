@@ -1,10 +1,10 @@
 """Pruebas de GET /anuncios sobre SQLite en memoria, sin leer .env ni conectar MySQL."""
 
 import unittest
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from fastapi.testclient import TestClient
-from sqlalchemy import Column, DateTime, MetaData, String, Table, Text, create_engine
+from sqlalchemy import Column, Date, MetaData, String, Table, Text, create_engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.pool import StaticPool
 
@@ -22,10 +22,11 @@ class AnunciosTest(unittest.TestCase):
         metadata = MetaData()
         self.anuncios = Table(
             "anuncio", metadata, Column("id", String(36), primary_key=True),
-            Column("titulo", String(120), nullable=False), Column("contenido", Text, nullable=False),
-            Column("publicado_en", DateTime, nullable=False),
+            Column("titulo", String(150), nullable=False), Column("descripcion", Text, nullable=False),
+            Column("fecha", Date, nullable=False),
         )
         metadata.create_all(self.engine)
+        # 25 de octubre a las 12:00 UTC: en Monterrey ya es el 25
         self.momento = datetime(2026, 10, 25, 12, 0, 0)
 
         engine_previo, ahora_previo = views.engine, views.ahora
@@ -40,15 +41,15 @@ class AnunciosTest(unittest.TestCase):
         self.client = TestClient(views.app)
         self.addCleanup(self.client.close)
 
-    def insertar(self, id, titulo, publicado_en):
+    def insertar(self, id, titulo, fecha):
         with self.engine.begin() as conn:
             conn.execute(self.anuncios.insert(), {
-                "id": id, "titulo": titulo, "contenido": "Texto de " + titulo, "publicado_en": publicado_en,
+                "id": id, "titulo": titulo, "descripcion": "Texto de " + titulo, "fecha": fecha,
             })
 
-    def test_sin_token_mas_nuevo_primero_y_en_utc(self):
-        self.insertar("a", "Viejo", self.momento - timedelta(days=3))
-        self.insertar("b", "Nuevo", self.momento - timedelta(hours=1))
+    def test_sin_token_mas_nuevo_primero_a_medianoche_de_monterrey(self):
+        self.insertar("a", "Viejo", date(2026, 10, 20))
+        self.insertar("b", "Nuevo", date(2026, 10, 25))
         respuesta = self.client.get("/anuncios")
         self.assertEqual(respuesta.status_code, 200, respuesta.text)
         anuncios = respuesta.json()
@@ -56,14 +57,17 @@ class AnunciosTest(unittest.TestCase):
         self.assertEqual(set(anuncios[0]), {"id", "titulo", "contenido", "publicado_en"})
         self.assertEqual(anuncios[0]["contenido"], "Texto de Nuevo")
         fecha = datetime.fromisoformat(anuncios[0]["publicado_en"].replace("Z", "+00:00"))
-        self.assertEqual(fecha.utcoffset(), timedelta(0))
-        self.assertEqual(fecha.replace(tzinfo=None), self.momento - timedelta(hours=1))
+        self.assertEqual(fecha.utcoffset(), timedelta(hours=-6))
+        self.assertEqual(fecha.replace(tzinfo=None), datetime(2026, 10, 25))
 
-    def test_programados_no_salen_hasta_su_hora(self):
-        self.insertar("a", "Ya salio", self.momento)
-        self.insertar("b", "Programado", self.momento + timedelta(minutes=5))
-        self.assertEqual([a["titulo"] for a in self.client.get("/anuncios").json()], ["Ya salio"])
-        self.momento += timedelta(minutes=5)
+    def test_dias_futuros_no_salen_hasta_ese_dia_en_monterrey(self):
+        self.insertar("a", "Hoy", date(2026, 10, 25))
+        self.insertar("b", "Mañana", date(2026, 10, 26))
+        self.assertEqual([a["titulo"] for a in self.client.get("/anuncios").json()], ["Hoy"])
+        # 03:00 UTC del 26 sigue siendo el 25 en Monterrey
+        self.momento = datetime(2026, 10, 26, 3, 0, 0)
+        self.assertEqual(len(self.client.get("/anuncios").json()), 1)
+        self.momento = datetime(2026, 10, 26, 6, 0, 0)
         self.assertEqual(len(self.client.get("/anuncios").json()), 2)
 
     def test_vacio(self):
