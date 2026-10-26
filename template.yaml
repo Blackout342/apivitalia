@@ -1,0 +1,66 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: API Vitalia (FastAPI) en AWS Lambda + API Gateway HTTP API
+
+# Los valores secretos (NoEcho) no se guardan en samconfig.toml ni se muestran en consola.
+Parameters:
+  DbHost:
+    Type: String
+  DbPort:
+    Type: String
+    Default: "3306"
+  DbName:
+    Type: String
+  DbUser:
+    Type: String
+  DbPassword:
+    Type: String
+    NoEcho: true
+  JwtSecreto:
+    Type: String
+    NoEcho: true
+  CruzRojaClave:
+    Type: String
+    NoEcho: true
+  CorsOrigenes:
+    Type: String
+    Default: "http://localhost:5500,http://127.0.0.1:5500"
+
+Resources:
+  ApiVitaliaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: lambda_handler.handler
+      Runtime: python3.12
+      Architectures:
+        - arm64
+      MemorySize: 512
+      Timeout: 20
+      Environment:
+        Variables:
+          DB_HOST: !Ref DbHost
+          DB_PORT: !Ref DbPort
+          DB_NAME: !Ref DbName
+          DB_USER: !Ref DbUser
+          DB_PASSWORD: !Ref DbPassword
+          JWT_SECRETO: !Ref JwtSecreto
+          CRUZ_ROJA_CLAVE: !Ref CruzRojaClave
+          CORS_ORIGENES: !Ref CorsOrigenes
+          # En Lambda nunca se crean ni alteran tablas al arrancar.
+          VITALIA_PREPARAR_ESQUEMA: "0"
+      Events:
+        TodasLasRutas:
+          # Sin Path ni Method = ruta $default, recibe todo (incluye / y /docs).
+          Type: HttpApi
+
+  ApiVitaliaLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ApiVitaliaFunction}
+      RetentionInDays: 14
+
+Outputs:
+  ApiUrl:
+    Description: URL base de la API (va en APIConfig.swift)
+    Value: !Sub https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com

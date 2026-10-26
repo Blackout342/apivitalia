@@ -24,6 +24,7 @@ from sqlalchemy import DateTime, bindparam, create_engine, event, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from models import (
+    AnuncioRespuesta,
     AvisoRespuesta,
     CitaRespuesta,
     ContactoRespuesta,
@@ -562,6 +563,17 @@ def asegurar_esquema() -> None:
                 KEY idx_aviso_usuario (usuario_id, creado_en),
                 CONSTRAINT fk_aviso_usuario
                     FOREIGN KEY (usuario_id) REFERENCES usuario (id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """))
+        # Noticias del tablero, iguales para todos. Se escriben a mano en la base (sql/anuncios.sql).
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS anuncio (
+                id CHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT (UUID()),
+                titulo VARCHAR(120) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+                contenido TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+                publicado_en DATETIME NOT NULL DEFAULT (UTC_TIMESTAMP()),
+                PRIMARY KEY (id),
+                KEY idx_anuncio_publicado (publicado_en)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """))
         # NULL cuando el reloj pidió ayuda sin cuenta. Las tablas que ya existían se abren aquí.
@@ -1483,6 +1495,31 @@ def listar_avisos(usuario_id: str, token_id: str = Depends(usuario_actual)):
         logging.exception("No se pudieron leer los avisos")
         raise ErrorAPI(503, "No se pudo consultar la base de datos")
     return [dict(fila) for fila in filas]
+
+
+@app.get("/anuncios", response_model=list[AnuncioRespuesta])
+def listar_anuncios():
+    """Noticias del tablero, la más nueva primero. Son públicas, no piden token.
+    Las que tienen publicado_en en el futuro no salen hasta esa hora."""
+    try:
+        with engine.connect() as conn:
+            filas = conn.execute(
+                text("""
+                    SELECT id, titulo, contenido, publicado_en
+                    FROM anuncio
+                    WHERE publicado_en <= :ahora
+                    ORDER BY publicado_en DESC, id
+                    LIMIT 50
+                """)
+                .columns(publicado_en=DateTime())
+                .bindparams(bindparam("ahora", type_=DateTime())),
+                {"ahora": ahora()},
+            ).mappings().all()
+    except SQLAlchemyError:
+        logging.exception("No se pudieron leer los anuncios")
+        raise ErrorAPI(503, "No se pudo consultar la base de datos")
+    # La base guarda UTC sin zona. Con la zona puesta la app no la confunde con hora local
+    return [dict(fila, publicado_en=fila["publicado_en"].replace(tzinfo=timezone.utc)) for fila in filas]
 
 
 # Citas. Usan el mismo token y la misma base que el resto de los endpoints.

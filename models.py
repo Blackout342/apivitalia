@@ -164,3 +164,12 @@ class AvisoRespuesta(BaseModel):
     titulo: str
     contenido: str
     creado_en: datetime
+
+
+class AnuncioRespuesta(BaseModel):
+    """Noticia del tablero de la app. Es la misma para todas las cuentas. publicado_en va en UTC."""
+
+    id: str
+    titulo: str
+    contenido: str
+    publicado_en: datetime
